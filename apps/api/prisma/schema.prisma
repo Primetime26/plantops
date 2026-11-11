@@ -1,0 +1,59 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "sqlite"
+  url = env("DATABASE_URL")
+}
+model Equipment {
+  id String @id
+  name String
+  type String
+  location String
+  description String
+  status String @default("NORMAL")
+  temperature Float
+  pressure Float
+  vibration Float?
+  temperatureBase Float
+  pressureBase Float
+  vibrationBase Float?
+  temperatureWarning Float
+  temperatureCritical Float
+  pressureWarning Float
+  pressureCritical Float
+  vibrationWarning Float?
+  vibrationCritical Float?
+  overheat Boolean @default(false)
+  overpressure Boolean @default(false)
+  updatedAt DateTime @default(now())
+  readings TelemetryReading[]
+  incidents Incident[]
+}
+model TelemetryReading {
+  id Int @id @default(autoincrement())
+  equipmentId String
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Cascade)
+  timestamp DateTime @default(now())
+  temperature Float
+  pressure Float
+  vibration Float?
+  @@index([equipmentId, timestamp])
+  @@index([timestamp])
+}
+model Incident {
+  id String @id @default(cuid())
+  equipmentId String
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Cascade)
+  type String
+  description String
+  severity String
+  status String @default("ACTIVE")
+  occurredAt DateTime @default(now())
+  acknowledgedAt DateTime?
+  resolvedAt DateTime?
+  // NULL for resolved rows. SQLite permits multiple NULLs in a UNIQUE index.
+  activeKey String? @unique
+  @@index([equipmentId, occurredAt])
+  @@index([status, occurredAt])
+}
