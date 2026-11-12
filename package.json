@@ -14,16 +14,22 @@
     "setup": "node scripts/setup.mjs && npm run db:generate && npm run db:migrate && npm run db:seed",
     "dev": "concurrently -k -n API,WEB -c cyan,blue \"npm run dev -w @plantops/api\" \"npm run dev -w @plantops/web\"",
     "build": "npm run build -w @plantops/api && npm run build -w @plantops/web",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p tsconfig.e2e.json",
     "test": "npm run test -w @plantops/api",
     "db:generate": "npm run db:generate -w @plantops/api",
     "db:migrate": "npm run db:migrate -w @plantops/api",
     "db:seed": "npm run db:seed -w @plantops/api",
     "start": "npm run start -w @plantops/api",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "build:demo": "npm run db:generate && npm run build",
+    "start:demo": "node scripts/demo.mjs",
+    "test:e2e": "playwright test",
+    "test:unit": "npm run test -w @plantops/api -- tests/domain.test.ts",
+    "check:resources": "node --max-old-space-size=128 --max-semi-space-size=4 scripts/measure-demo.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/node": "^22.15.0",
     "concurrently": "9.1.2",
     "prettier": "^3.9.10",
@@ -31,5 +37,6 @@
   },
   "overrides": {
     "deepmerge-ts": "^8.0.0"
-  }
+  },
+  "packageManager": "npm@10.9.2"
 }

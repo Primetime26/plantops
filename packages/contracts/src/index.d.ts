@@ -1,7 +1,7 @@
 export type EquipmentStatus = 'NORMAL' | 'WARNING' | 'CRITICAL';
 export type IncidentStatus = 'ACTIVE' | 'ACKNOWLEDGED' | 'RESOLVED';
 export type Severity = 'WARNING' | 'CRITICAL';
-export type FaultType = 'OVERHEAT' | 'OVERPRESSURE';
+export type FaultType = 'OVERHEAT' | 'OVERPRESSURE' | 'HIGH_VIBRATION' | 'COMBINED';
 export type EventType = 'TEMPERATURE' | 'PRESSURE' | 'VIBRATION';
 export interface Equipment {
   id: string;
@@ -24,6 +24,7 @@ export interface Equipment {
   vibrationCritical: number | null;
   overheat: boolean;
   overpressure: boolean;
+  highVibration: boolean;
   updatedAt: string;
 }
 export interface TelemetryReading {
@@ -49,6 +50,7 @@ export interface SimulatorState {
   intervalMs: number;
   lastTickAt: string | null;
   error: string | null;
+  mode?: 'background' | 'on-demand';
 }
 export interface Summary {
   total: number;
@@ -58,6 +60,7 @@ export interface Summary {
   activeIncidents: number;
   unacknowledged: number;
   simulator: SimulatorState;
+  maintenance: Record<WorkOrderStatus, number>;
 }
 export interface Page<T> {
   items: T[];
@@ -66,6 +69,7 @@ export interface Page<T> {
   pageSize: number;
 }
 export interface Analytics {
+  incidentsByType: { type: EventType; count: number }[];
   incidentsByEquipment: { id: string; count: number }[];
   incidentsBySeverity: { severity: Severity; count: number }[];
   totalReadings: number;
@@ -76,4 +80,37 @@ export interface Analytics {
 }
 export interface ApiError {
   error: { code: string; message: string; details?: unknown };
+}
+
+export type WorkOrderStatus = 'OPEN' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED';
+export type Priority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
+export interface WorkOrder {
+  id: string;
+  equipmentId: string;
+  title: string;
+  description: string;
+  priority: Priority;
+  assignee: string;
+  status: WorkOrderStatus;
+  resolution: string;
+  version: number;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  comments: { id: string; author: string; text: string; createdAt: string }[];
+  history: { id: string; action: string; detail: string; createdAt: string }[];
+}
+export interface SessionInfo {
+  mode: 'local' | 'demo';
+  revision: string;
+  resetReason: string | null;
+  pollMs: number;
+  expiresInSeconds: number | null;
+  limits: {
+    sessions: number;
+    readingsPerEquipment: number;
+    incidents: number;
+    workOrders: number;
+  } | null;
 }

@@ -2,7 +2,7 @@ import { useContext, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CheckCheck, CircleAlert, CircleCheck, TriangleAlert } from 'lucide-react';
 import type { Incident } from '@plantops/contracts';
-import { api, RefreshContext } from '@/lib/api';
+import { api, runtime, RefreshContext } from '@/lib/api';
 import { Button } from './ui/button';
 import { Empty, Status } from './common';
 import { dateTime } from '@/lib/utils';
@@ -43,7 +43,10 @@ export function IncidentFeed({ items }: { items: Incident[] }) {
       <div className="quiet-state">
         <CircleCheck size={32} />
         <strong>Участок работает штатно</strong>
-        <p>Новых событий нет. Симулятор контролирует параметры каждые 2 секунды.</p>
+        <p>
+          Новых событий нет. Параметры обновляются каждые {runtime()?.pollMs === 5000 ? 5 : 2} с при
+          активном просмотре.
+        </p>
         <Link to="/equipment/H-101">Открыть симуляцию Н-101 →</Link>
       </div>
     );

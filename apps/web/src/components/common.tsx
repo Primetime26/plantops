@@ -8,7 +8,6 @@ import {
   Fan,
   Flame,
   Gauge,
-  RefreshCw,
   Thermometer,
   Waves,
 } from 'lucide-react';
@@ -88,7 +87,11 @@ export function ErrorBanner({ error }: { error?: string }) {
 export function Loading() {
   return (
     <div className="empty">
-      <RefreshCw className="animate-spin" size={24} />
+      <div className="skeleton-lines" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </div>
       <span>Получаем данные участка…</span>
     </div>
   );

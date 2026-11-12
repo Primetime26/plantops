@@ -11,3 +11,6 @@ coverage/
 work/
 outputs/
 *.log
+
+playwright-report/
+test-results/

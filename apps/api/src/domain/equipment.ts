@@ -1,6 +1,6 @@
-import type { Prisma } from '@prisma/client';
+import type { EquipmentRecord } from './models.js';
 const pump = {
-  type: 'PUMP',
+  type: 'PUMP' as const,
   temperatureBase: 52,
   pressureBase: 4.2,
   vibrationBase: 1.8,
@@ -11,7 +11,10 @@ const pump = {
   vibrationWarning: 4.5,
   vibrationCritical: 7.1,
 };
-export const seedEquipment: Prisma.EquipmentCreateManyInput[] = [
+export const seedEquipment: Omit<
+  EquipmentRecord,
+  'status' | 'updatedAt' | 'overheat' | 'overpressure' | 'highVibration'
+>[] = [
   {
     ...pump,
     id: 'H-101',

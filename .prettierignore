@@ -5,3 +5,6 @@ work
 outputs
 *.db
 *.db-*
+
+playwright-report/
+test-results/

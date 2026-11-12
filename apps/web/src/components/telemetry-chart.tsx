@@ -10,7 +10,7 @@ import {
   YAxis,
 } from 'recharts';
 import type { Equipment, TelemetryReading } from '@plantops/contracts';
-import { api, RefreshContext } from '@/lib/api';
+import { api, runtime, pollingAllowed, RefreshContext } from '@/lib/api';
 import { colors, Empty, ErrorBanner, Loading, metricMeta, type Metric } from './common';
 import { number } from '@/lib/utils';
 type ChartPoint = { timestamp: number; [id: string]: number | null };
@@ -45,19 +45,16 @@ export function TelemetryChart({
     let timer: ReturnType<typeof setTimeout>;
     const controller = new AbortController();
     async function load() {
+      if (!pollingAllowed()) {
+        if (active) timer = setTimeout(load, 1000);
+        return;
+      }
       try {
-        const series = await Promise.all(
-          ids
-            .split(',')
-            .filter(Boolean)
-            .map(async (id) => ({
-              id,
-              ...(await api<{ items: TelemetryReading[]; bucketMs: number }>(
-                `/equipment/${id}/telemetry?minutes=${minutes}`,
-                { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]) },
-              )),
-            })),
+        const all = await api<{ id: string; items: TelemetryReading[]; bucketMs: number }[]>(
+          `/telemetry?minutes=${minutes}`,
+          { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(45000)]) },
         );
+        const series = all.filter((s) => ids.split(',').includes(s.id));
         const grouped = new Map<number, ChartPoint>();
         for (const seriesItem of series)
           for (const point of seriesItem.items) {
@@ -82,7 +79,7 @@ export function TelemetryChart({
             loaded: true,
           }));
       }
-      if (active) timer = setTimeout(load, 2000);
+      if (active) timer = setTimeout(load, runtime()?.pollMs ?? 5000);
     }
     void load();
     return () => {

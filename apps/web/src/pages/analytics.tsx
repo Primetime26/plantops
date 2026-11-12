@@ -12,9 +12,10 @@ import {
   YAxis,
 } from 'recharts';
 import type { Analytics, Equipment, Summary } from '@plantops/contracts';
-import { usePoll } from '@/lib/api';
+import { downloadCsv, usePoll } from '@/lib/api';
 import { Empty, ErrorBanner, Loading, PageHeading, Panel, PeriodSelect } from '@/components/common';
 import { TelemetryChart } from '@/components/telemetry-chart';
+import { Button } from '@/components/ui/button';
 const tooltipStyle = {
   background: '#1c242c',
   border: '1px solid #36424c',
@@ -43,6 +44,14 @@ export function AnalyticsPage({ summary }: { summary?: Summary }) {
         description="Накопленная телеметрия и события производственного участка."
         actions={
           <div className="inline-controls">
+            <Button
+              variant="outline"
+              onClick={() =>
+                downloadCsv(`/analytics/export?minutes=${minutes}`, 'plantops-telemetry.csv')
+              }
+            >
+              Экспорт CSV
+            </Button>
             <select
               aria-label="Оборудование для анализа"
               value={equipmentId}
@@ -75,6 +84,15 @@ export function AnalyticsPage({ summary }: { summary?: Summary }) {
             <strong>{k.value ?? '—'}</strong>
             <small>По всему участку</small>
           </div>
+        ))}
+      </div>
+      <div className="maintenance-strip" aria-label="Распределение неисправностей">
+        <strong>Причины событий</strong>
+        {analytics.data?.incidentsByType.map((i) => (
+          <span key={i.type}>
+            {{ TEMPERATURE: 'Температура', PRESSURE: 'Давление', VIBRATION: 'Вибрация' }[i.type]}:{' '}
+            <b>{i.count}</b>
+          </span>
         ))}
       </div>
       <div className="analytics-grid">

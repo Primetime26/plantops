@@ -1,6 +1,9 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": { "rootDir": "src" },
+  "compilerOptions": {
+    "rootDir": "src",
+    "noEmitOnError": true
+  },
   "include": ["src"],
   "exclude": ["tests", "prisma", "vitest.config.ts"]
 }

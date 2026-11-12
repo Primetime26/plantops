@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowRight, Radio, Workflow } from 'lucide-react';
 import type { Equipment, Incident, Page, Summary } from '@plantops/contracts';
-import { usePoll } from '@/lib/api';
+import { runtime, usePoll } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import {
   EquipmentIcon,
@@ -30,12 +30,36 @@ export function Dashboard({ summary }: { summary?: Summary }) {
         description="Всё оборудование. Все параметры. Под контролем."
         actions={
           <span className="live-label">
-            <Radio size={15} /> Обновление каждые 2 с
+            <Radio size={15} /> Обновление каждые {runtime()?.pollMs === 5000 ? '5' : '2'} с
           </span>
         }
       />
       <ErrorBanner error={equipment.error ?? incidents.error} />
-      {summary && <Kpis data={summary} />}
+      {summary && (
+        <>
+          <Kpis data={summary} />
+          <div className="maintenance-strip">
+            <Link to="/maintenance">
+              <strong>Техническое обслуживание →</strong>
+            </Link>
+            <span>
+              Открыто: <b>{summary.maintenance.OPEN}</b>
+            </span>
+            <span>
+              В работе: <b>{summary.maintenance.IN_PROGRESS}</b>
+            </span>
+            <span>
+              Выполнено: <b>{summary.maintenance.COMPLETED}</b>
+            </span>
+            <span>
+              Обновлено:{' '}
+              {summary.simulator.lastTickAt
+                ? new Date(summary.simulator.lastTickAt).toLocaleTimeString('ru-RU')
+                : '—'}
+            </span>
+          </div>
+        </>
+      )}
       <div className="overview-grid">
         <Panel
           title="Динамика показателей"

@@ -1,169 +1,314 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { Prisma, type PrismaClient } from '@prisma/client';
 import type { Simulator } from '../services/simulator.js';
+import { getEquipment } from '../services/simulator.js';
+import { MaintenanceService } from '../services/maintenance.js';
+import { csv } from '../services/csv.js';
 import { AppError } from '../errors.js';
-const equipmentId = z.string().regex(/^[A-Z]-\d{3}$/, 'Неверный ID оборудования');
-const incidentId = z.string().min(1).max(80);
-const status = z.enum(['NORMAL', 'WARNING', 'CRITICAL']);
-const period = z.object({ minutes: z.coerce.number().int().min(1).max(1440).default(15) }).strict();
-const equipmentQuery = z
-  .object({ search: z.string().max(100).optional(), status: status.optional() })
-  .strict();
-const incidentQuery = z
-  .object({
-    equipmentId: equipmentId.optional(),
-    status: z.enum(['ACTIVE', 'ACKNOWLEDGED', 'RESOLVED']).optional(),
-    severity: z.enum(['WARNING', 'CRITICAL']).optional(),
-    page: z.coerce.number().int().min(1).max(100000).default(1),
-    pageSize: z.coerce.number().int().min(1).max(100).default(20),
-  })
-  .strict();
-export function apiRouter(db: PrismaClient, simulator: Simulator) {
+import * as v from '../domain/validation.js';
+import type { UnitOfWork } from '../storage/repository.js';
+import type { Reading } from '../domain/models.js';
+const paginate = <T>(items: T[], page: number, pageSize: number) => ({
+  items: items.slice((page - 1) * pageSize, page * pageSize),
+  total: items.length,
+  page,
+  pageSize,
+});
+async function incidents(tx: UnitOfWork, q: z.infer<typeof v.incidentQuery>) {
+  const equipment = await tx.equipment();
+  return (await tx.incidents())
+    .filter(
+      (i) =>
+        (!q.equipmentId || i.equipmentId === q.equipmentId) &&
+        (!q.status || i.status === q.status) &&
+        (!q.severity || i.severity === q.severity),
+    )
+    .sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime() || b.id.localeCompare(a.id))
+    .map((i) => ({
+      ...i,
+      equipment: { id: i.equipmentId, name: equipment.find((e) => e.id === i.equipmentId)!.name },
+    }));
+}
+function aggregate(rows: Reading[], bucketMs: number) {
+  const buckets = new Map<number, Reading[]>();
+  for (const r of rows) {
+    const key = Math.floor(r.timestamp.getTime() / bucketMs);
+    const group = buckets.get(key) ?? [];
+    group.push(r);
+    buckets.set(key, group);
+  }
+  return [...buckets.values()].map((group) => ({
+    timestamp: group[group.length - 1].timestamp,
+    temperature: group.reduce((n, r) => n + r.temperature, 0) / group.length,
+    pressure: group.reduce((n, r) => n + r.pressure, 0) / group.length,
+    vibration:
+      group[0].vibration === null
+        ? null
+        : group.reduce((n, r) => n + (r.vibration ?? 0), 0) / group.length,
+  }));
+}
+async function telemetry(tx: UnitOfWork, id: string, minutes: number, now: Date) {
+  await getEquipment(tx, id);
+  const from = new Date(now.getTime() - minutes * 60000),
+    bucketMs = Math.max(2000, Math.ceil((minutes * 60000) / 300));
+  return {
+    id,
+    items: aggregate(await tx.readings(id, from, now), bucketMs),
+    from,
+    to: now,
+    bucketMs,
+  };
+}
+export function apiRouter(now = () => new Date()) {
   const api = Router();
-  api.get('/health', async (_req, res) => {
-    await db.$queryRaw`SELECT 1`;
-    res.json({ status: 'ok', demo: true, simulator: simulator.state });
+  api.use(async (_req, res, next) => {
+    await (res.locals.simulator as Simulator).advance();
+    next();
   });
+  const sim = (res: { locals: Record<string, unknown> }) => res.locals.simulator as Simulator;
   api.get('/equipment', async (req, res) => {
-    const q = equipmentQuery.parse(req.query);
+    const q = z
+      .object({ search: z.string().max(100).optional(), status: v.status.optional() })
+      .strict()
+      .parse(req.query);
     res.json(
-      await db.equipment.findMany({
-        where: {
-          status: q.status,
-          ...(q.search
-            ? {
-                OR: [
-                  { name: { contains: q.search } },
-                  { id: { contains: q.search } },
-                  { description: { contains: q.search } },
-                ],
-              }
-            : {}),
-        },
-        orderBy: { id: 'asc' },
+      await sim(res).repository.read(async (tx) =>
+        (await tx.equipment()).filter(
+          (e) =>
+            (!q.status || e.status === q.status) &&
+            (!q.search ||
+              `${e.name} ${e.id} ${e.description}`.toLowerCase().includes(q.search.toLowerCase())),
+        ),
+      ),
+    );
+  });
+  api.get('/equipment/:id', async (req, res) =>
+    res.json(
+      await sim(res).repository.read((tx) => getEquipment(tx, v.equipmentId.parse(req.params.id))),
+    ),
+  );
+  api.get('/equipment/:id/telemetry', async (req, res) => {
+    const { minutes } = v.period.parse(req.query);
+    res.json(
+      await sim(res).repository.read((tx) =>
+        telemetry(tx, v.equipmentId.parse(req.params.id), minutes, now()),
+      ),
+    );
+  });
+  api.get('/telemetry', async (req, res) => {
+    const { minutes } = v.period.parse(req.query);
+    res.json(
+      await sim(res).repository.read(async (tx) =>
+        Promise.all((await tx.equipment()).map((e) => telemetry(tx, e.id, minutes, now()))),
+      ),
+    );
+  });
+  api.get('/incidents/export', async (req, res) => {
+    const q = v.incidentQuery.parse(req.query);
+    const rows = await sim(res).repository.read((tx) => incidents(tx, q));
+    res
+      .attachment('plantops-incidents.csv')
+      .type('text/csv')
+      .send(
+        csv([
+          [
+            'ID',
+            'Оборудование',
+            'Тип',
+            'Описание',
+            'Критичность',
+            'Статус',
+            'Возник',
+            'Подтверждён',
+            'Устранён',
+          ],
+          ...rows
+            .slice(0, 10000)
+            .map((i) => [
+              i.id,
+              i.equipment.name,
+              i.type,
+              i.description,
+              i.severity,
+              i.status,
+              i.occurredAt,
+              i.acknowledgedAt,
+              i.resolvedAt,
+            ]),
+        ]),
+      );
+  });
+  api.get('/incidents', async (req, res) => {
+    const q = v.incidentQuery.parse(req.query);
+    res.json(
+      await sim(res).repository.read(async (tx) =>
+        paginate(await incidents(tx, q), q.page, q.pageSize),
+      ),
+    );
+  });
+  api.get('/incidents/:id', async (req, res) => {
+    const id = v.id.parse(req.params.id);
+    const i = await sim(res).repository.read(async (tx) =>
+      (await incidents(tx, { page: 1, pageSize: 100 })).find((i) => i.id === id),
+    );
+    if (!i) throw new AppError(404, 'NOT_FOUND', 'Инцидент не найден');
+    res.json(i);
+  });
+  api.patch('/incidents/:id/acknowledge', async (req, res) =>
+    res.json(await sim(res).acknowledge(v.id.parse(req.params.id))),
+  );
+  api.post('/simulation/equipment/:id/fault', async (req, res) => {
+    const { type } = z
+      .object({ type: z.enum(['OVERHEAT', 'OVERPRESSURE', 'HIGH_VIBRATION', 'COMBINED']) })
+      .strict()
+      .parse(req.body);
+    res.status(202).json(await sim(res).fault(v.equipmentId.parse(req.params.id), type));
+  });
+  api.post('/simulation/equipment/:id/reset', async (req, res) =>
+    res.json(await sim(res).reset(v.equipmentId.parse(req.params.id))),
+  );
+  api.get('/dashboard/summary', async (_req, res) =>
+    res.json(
+      await sim(res).repository.read(async (tx) => {
+        const e = await tx.equipment(),
+          i = await tx.incidents(),
+          orders = (await tx.orders(false)).filter((o) => !o.archived);
+        return {
+          total: e.length,
+          normal: e.filter((e) => e.status === 'NORMAL').length,
+          warning: e.filter((e) => e.status === 'WARNING').length,
+          critical: e.filter((e) => e.status === 'CRITICAL').length,
+          activeIncidents: i.filter((i) => i.status !== 'RESOLVED').length,
+          unacknowledged: i.filter((i) => i.status === 'ACTIVE').length,
+          simulator: sim(res).state,
+          maintenance: Object.fromEntries(
+            ['OPEN', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'].map((s) => [
+              s,
+              orders.filter((o) => o.status === s).length,
+            ]),
+          ),
+        };
+      }),
+    ),
+  );
+  api.get('/analytics', async (req, res) => {
+    const { minutes } = v.period.parse(req.query),
+      to = now(),
+      from = new Date(to.getTime() - minutes * 60000);
+    res.json(
+      await sim(res).repository.read(async (tx) => {
+        const events = (await tx.incidents()).filter(
+          (i) => i.occurredAt >= from && i.occurredAt <= to,
+        );
+        return {
+          from,
+          to,
+          totalReadings: await tx.countReadings(from, to),
+          totalIncidents: events.length,
+          resolvedIncidents: events.filter((i) => i.status === 'RESOLVED').length,
+          incidentsByEquipment: (await tx.equipment()).map((e) => ({
+            id: e.id,
+            count: events.filter((i) => i.equipmentId === e.id).length,
+          })),
+          incidentsBySeverity: ['WARNING', 'CRITICAL'].map((severity) => ({
+            severity,
+            count: events.filter((i) => i.severity === severity).length,
+          })),
+          incidentsByType: ['TEMPERATURE', 'PRESSURE', 'VIBRATION'].map((type) => ({
+            type,
+            count: events.filter((i) => i.type === type).length,
+          })),
+        };
       }),
     );
   });
-  api.get('/equipment/:id', async (req, res) => {
-    const e = await db.equipment.findUnique({ where: { id: equipmentId.parse(req.params.id) } });
-    if (!e) throw new AppError(404, 'NOT_FOUND', 'Оборудование не найдено');
-    res.json(e);
+  api.get('/analytics/export', async (req, res) => {
+    const { minutes } = v.period.parse(req.query);
+    const series = await sim(res).repository.read(async (tx) =>
+      Promise.all((await tx.equipment()).map((e) => telemetry(tx, e.id, minutes, now()))),
+    );
+    res
+      .attachment('plantops-telemetry.csv')
+      .type('text/csv')
+      .send(
+        csv([
+          [
+            'Оборудование',
+            'Время UTC',
+            'Температура °C (среднее)',
+            'Давление бар (среднее)',
+            'Вибрация мм/с (среднее)',
+          ],
+          ...series.flatMap((s) =>
+            s.items.map((r) => [s.id, r.timestamp, r.temperature, r.pressure, r.vibration]),
+          ),
+        ]),
+      );
   });
-  api.get('/equipment/:id/telemetry', async (req, res) => {
-    const id = equipmentId.parse(req.params.id);
-    const { minutes } = period.parse(req.query);
-    if (!(await db.equipment.findUnique({ where: { id } })))
-      throw new AppError(404, 'NOT_FOUND', 'Оборудование не найдено');
-    const to = Date.now(),
-      from = to - minutes * 60000,
-      bucketMs = Math.max(2000, Math.ceil((minutes * 60000) / 300));
-    // At most ~301 points; aggregation happens in SQLite, not in the browser.
-    const rows = await db.$queryRaw<
-      { stamp: bigint; temperature: number; pressure: number; vibration: number | null }[]
-    >(Prisma.sql`
-      SELECT MAX(timestamp) AS stamp, AVG(temperature) AS temperature, AVG(pressure) AS pressure, AVG(vibration) AS vibration
-      FROM TelemetryReading WHERE equipmentId=${id} AND timestamp>=${from} AND timestamp<=${to}
-      GROUP BY CAST(timestamp / ${bucketMs} AS INTEGER) ORDER BY stamp ASC`);
-    res.json({
-      items: rows.map((r) => ({
-        timestamp: new Date(Number(r.stamp)).toISOString(),
-        temperature: r.temperature,
-        pressure: r.pressure,
-        vibration: r.vibration,
-      })),
-      from: new Date(from).toISOString(),
-      to: new Date(to).toISOString(),
-      bucketMs,
-    });
+  api.get('/maintenance', async (req, res) => {
+    const q = v.orderQuery.parse(req.query);
+    res.json(
+      await sim(res).repository.read(async (tx) =>
+        paginate(
+          (await tx.orders(false))
+            .filter(
+              (o) =>
+                !o.archived &&
+                (!q.equipmentId || o.equipmentId === q.equipmentId) &&
+                (!q.status || o.status === q.status) &&
+                (!q.priority || o.priority === q.priority) &&
+                (!q.search ||
+                  `${o.title} ${o.description} ${o.assignee}`
+                    .toLowerCase()
+                    .includes(q.search.toLowerCase())),
+            )
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime()),
+          q.page,
+          q.pageSize,
+        ),
+      ),
+    );
   });
-  api.get('/incidents', async (req, res) => {
-    const { page, pageSize, ...where } = incidentQuery.parse(req.query);
-    const [items, total] = await db.$transaction([
-      db.incident.findMany({
-        where,
-        include: { equipment: { select: { id: true, name: true } } },
-        orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      db.incident.count({ where }),
-    ]);
-    res.json({ items, total, page, pageSize });
+  api.get('/maintenance/:id', async (req, res) => {
+    const id = v.id.parse(req.params.id);
+    const order = await sim(res).repository.read(async (tx) => tx.order(id));
+    if (!order || order.archived) throw new AppError(404, 'NOT_FOUND', 'Заявка не найдена');
+    res.json(order);
   });
-  api.get('/incidents/:id', async (req, res) => {
-    const incident = await db.incident.findUnique({
-      where: { id: incidentId.parse(req.params.id) },
-      include: { equipment: { select: { id: true, name: true } } },
-    });
-    if (!incident) throw new AppError(404, 'NOT_FOUND', 'Инцидент не найден');
-    res.json(incident);
-  });
-  api.patch('/incidents/:id/acknowledge', async (req, res) => {
-    res.json(await simulator.acknowledge(incidentId.parse(req.params.id)));
-  });
-  api.post('/simulation/equipment/:id/fault', async (req, res) => {
-    const { type } = z
-      .object({ type: z.enum(['OVERHEAT', 'OVERPRESSURE']) })
-      .strict()
-      .parse(req.body);
-    res.status(202).json(await simulator.fault(equipmentId.parse(req.params.id), type));
-  });
-  api.post('/simulation/equipment/:id/reset', async (req, res) => {
-    res.json(await simulator.reset(equipmentId.parse(req.params.id)));
-  });
-  api.get('/dashboard/summary', async (_req, res) => {
-    const [total, normal, warning, critical, activeIncidents, unacknowledged] =
-      await db.$transaction([
-        db.equipment.count(),
-        db.equipment.count({ where: { status: 'NORMAL' } }),
-        db.equipment.count({ where: { status: 'WARNING' } }),
-        db.equipment.count({ where: { status: 'CRITICAL' } }),
-        db.incident.count({ where: { status: { not: 'RESOLVED' } } }),
-        db.incident.count({ where: { status: 'ACTIVE' } }),
-      ]);
-    res.json({
-      total,
-      normal,
-      warning,
-      critical,
-      activeIncidents,
-      unacknowledged,
-      simulator: simulator.state,
-    });
-  });
-  api.get('/analytics', async (req, res) => {
-    const { minutes } = period.parse(req.query),
-      to = new Date(),
-      from = new Date(to.getTime() - minutes * 60000),
-      where = { occurredAt: { gte: from, lte: to } };
-    const [byEquipment, bySeverity, totalReadings, totalIncidents, resolvedIncidents] =
-      await db.$transaction([
-        db.incident.groupBy({
-          by: ['equipmentId'],
-          where,
-          orderBy: { equipmentId: 'asc' },
-          _count: true,
-        }),
-        db.incident.groupBy({
-          by: ['severity'],
-          where,
-          orderBy: { severity: 'asc' },
-          _count: true,
-        }),
-        db.telemetryReading.count({ where: { timestamp: { gte: from, lte: to } } }),
-        db.incident.count({ where }),
-        db.incident.count({ where: { ...where, status: 'RESOLVED' } }),
-      ]);
-    res.json({
-      incidentsByEquipment: byEquipment.map((r) => ({ id: r.equipmentId, count: r._count })),
-      incidentsBySeverity: bySeverity.map((r) => ({ severity: r.severity, count: r._count })),
-      totalReadings,
-      totalIncidents,
-      resolvedIncidents,
-      from: from.toISOString(),
-      to: to.toISOString(),
-    });
+  api.post('/maintenance', async (req, res) =>
+    res
+      .status(201)
+      .json(
+        await new MaintenanceService(sim(res).repository, now).create(
+          v.createOrder.parse(req.body),
+        ),
+      ),
+  );
+  api.patch('/maintenance/:id', async (req, res) =>
+    res.json(
+      await new MaintenanceService(sim(res).repository, now).update(
+        v.id.parse(req.params.id),
+        v.updateOrder.parse(req.body),
+      ),
+    ),
+  );
+  api.post('/maintenance/:id/comments', async (req, res) =>
+    res
+      .status(201)
+      .json(
+        await new MaintenanceService(sim(res).repository, now).comment(
+          v.id.parse(req.params.id),
+          v.commentInput.parse(req.body),
+        ),
+      ),
+  );
+  api.delete('/maintenance/:id', async (req, res) => {
+    const { version } = z.object({ version: z.number().int().positive() }).strict().parse(req.body);
+    await new MaintenanceService(sim(res).repository, now).archive(
+      v.id.parse(req.params.id),
+      version,
+    );
+    res.status(204).end();
   });
   return api;
 }

@@ -32,6 +32,11 @@ export function EquipmentDetail() {
     [actionError, setActionError] = useState('');
   const { refresh } = useContext(RefreshContext);
   async function action(type: FaultType | 'RESET') {
+    if (
+      type === 'RESET' &&
+      !window.confirm('Восстановить нормальный режим и устранить связанные инциденты?')
+    )
+      return;
     setBusy(true);
     setMessage('');
     setActionError('');
@@ -139,11 +144,35 @@ export function EquipmentDetail() {
                     ? 'Превышение давления активно'
                     : 'Симулировать превышение давления'}
                 </Button>
+                <Button
+                  variant="outline"
+                  disabled={busy || asset.highVibration || asset.vibration === null}
+                  onClick={() => action('HIGH_VIBRATION')}
+                >
+                  <Activity />
+                  {asset.highVibration ? 'Вибрация активна' : 'Симулировать вибрацию'}
+                </Button>
+                <Button
+                  variant="outline"
+                  disabled={
+                    busy ||
+                    (asset.overheat &&
+                      asset.overpressure &&
+                      (asset.highVibration || asset.vibration === null))
+                  }
+                  onClick={() => action('COMBINED')}
+                >
+                  Комбинированная неисправность
+                </Button>
                 <div className="control-divider" />
                 <Button
                   variant="secondary"
                   disabled={
-                    busy || (!asset.overheat && !asset.overpressure && asset.status === 'NORMAL')
+                    busy ||
+                    (!asset.overheat &&
+                      !asset.overpressure &&
+                      !asset.highVibration &&
+                      asset.status === 'NORMAL')
                   }
                   onClick={() => action('RESET')}
                 >

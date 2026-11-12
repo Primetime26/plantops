@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import type { Equipment, Incident, Page } from '@plantops/contracts';
-import { usePoll } from '@/lib/api';
+import { downloadCsv, usePoll } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { ErrorBanner, Loading, PageHeading, Panel } from '@/components/common';
 import { IncidentTable } from '@/components/incidents';
@@ -24,6 +24,14 @@ export function IncidentsPage() {
       <PageHeading
         title="Аварии и инциденты"
         description="Журнал событий, подтверждения оператора и история устранения."
+        actions={
+          <Button
+            variant="outline"
+            onClick={() => downloadCsv(`/incidents/export?${params}`, 'plantops-incidents.csv')}
+          >
+            Экспорт CSV
+          </Button>
+        }
       />
       <div className="info-strip">
         Подтверждение означает, что оператор увидел сообщение. Инцидент устраняется только после

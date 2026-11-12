@@ -26,9 +26,11 @@ model Equipment {
   vibrationCritical Float?
   overheat Boolean @default(false)
   overpressure Boolean @default(false)
+  highVibration Boolean @default(false)
   updatedAt DateTime @default(now())
   readings TelemetryReading[]
   incidents Incident[]
+  workOrders WorkOrder[]
 }
 model TelemetryReading {
   id Int @id @default(autoincrement())
@@ -56,4 +58,40 @@ model Incident {
   activeKey String? @unique
   @@index([equipmentId, occurredAt])
   @@index([status, occurredAt])
+}
+
+model WorkOrder {
+  id String @id
+  equipmentId String
+  equipment Equipment @relation(fields: [equipmentId], references: [id], onDelete: Restrict)
+  title String
+  description String
+  priority String
+  assignee String
+  status String @default("OPEN")
+  resolution String @default("")
+  version Int @default(1)
+  archived Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+  completedAt DateTime?
+  comments WorkOrderComment[]
+  history WorkOrderHistory[]
+  @@index([equipmentId, status])
+}
+model WorkOrderComment {
+  id String @id
+  workOrderId String
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  author String
+  text String
+  createdAt DateTime @default(now())
+}
+model WorkOrderHistory {
+  id String @id
+  workOrderId String
+  workOrder WorkOrder @relation(fields: [workOrderId], references: [id], onDelete: Cascade)
+  action String
+  detail String
+  createdAt DateTime @default(now())
 }

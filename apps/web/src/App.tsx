@@ -10,14 +10,17 @@ import {
   Factory,
   FlaskConical,
   LayoutDashboard,
-  Radio,
   Server,
   Settings2,
   ShieldCheck,
 } from 'lucide-react';
 import type { Summary } from '@plantops/contracts';
-import { RefreshContext, usePoll } from '@/lib/api';
+import { runtime, pollingAllowed, RefreshContext, usePoll } from '@/lib/api';
 import { ErrorBanner, Loading } from '@/components/common';
+import { SessionGate, DemoBanner } from '@/components/session-gate';
+const MaintenancePage = lazy(() =>
+  import('@/pages/maintenance').then((m) => ({ default: m.MaintenancePage })),
+);
 const Dashboard = lazy(() => import('@/pages/dashboard').then((m) => ({ default: m.Dashboard })));
 const EquipmentPage = lazy(() =>
   import('@/pages/equipment').then((m) => ({ default: m.EquipmentPage })),
@@ -46,18 +49,20 @@ function Shell() {
     { to: '/', label: 'Главная панель', icon: LayoutDashboard },
     { to: '/equipment', label: 'Оборудование', icon: Settings2 },
     { to: '/incidents', label: 'Аварии и инциденты', icon: Bell },
+    { to: '/maintenance', label: 'Техобслуживание', icon: Settings2 },
     { to: '/analytics', label: 'Аналитика', icon: ChartNoAxesCombined },
   ];
   const title =
     nav.find((n) => (n.to === '/' ? location.pathname === '/' : location.pathname.startsWith(n.to)))
       ?.label ?? 'Страница';
+  const paused = runtime()?.mode === 'demo' && !pollingAllowed();
   const sim = summary.data?.simulator,
     live =
       !summary.error &&
       sim?.running &&
       !sim.error &&
       !!sim.lastTickAt &&
-      clock.getTime() - new Date(sim.lastTickAt).getTime() < 8000;
+      (sim.mode === 'on-demand' || clock.getTime() - new Date(sim.lastTickAt).getTime() < 8000);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -103,13 +108,22 @@ function Shell() {
           </div>
           <div className="system-status">
             <i className={live ? 'online' : 'offline'} />
-            <span>{live ? 'Симулятор работает' : 'Симулятор недоступен'}</span>
-            <small>v1.0</small>
+            <span>
+              {paused
+                ? 'Мониторинг на паузе'
+                : live
+                  ? 'Симулятор работает'
+                  : 'Симулятор недоступен'}
+            </span>
+            <small>v2.0</small>
           </div>
           <div className="operator">
             <span>ОП</span>
             <div>
-              Оператор участка<small>Локальная сессия · без входа</small>
+              Оператор участка
+              <small>
+                {runtime()?.mode === 'demo' ? 'Гостевая демосессия' : 'Локальная сессия'}
+              </small>
             </div>
           </div>
         </div>
@@ -126,11 +140,23 @@ function Shell() {
             <span
               className={`sim-badge ${live ? '' : 'offline'}`}
               role="status"
-              aria-label={live ? 'Симулятор активен' : 'Нет сигнала симулятора'}
-              title={live ? 'Симулятор активен' : 'Нет сигнала симулятора'}
+              aria-label={
+                paused
+                  ? 'Мониторинг на паузе'
+                  : live
+                    ? 'Симулятор активен'
+                    : 'Нет сигнала симулятора'
+              }
+              title={
+                paused
+                  ? 'Мониторинг на паузе'
+                  : live
+                    ? 'Симулятор активен'
+                    : 'Нет сигнала симулятора'
+              }
             >
               <i />
-              {live ? 'Симулятор активен' : 'Нет сигнала'}
+              {paused ? 'Мониторинг на паузе' : live ? 'Симулятор активен' : 'Нет сигнала'}
             </span>
             <span className="demo-badge">
               <FlaskConical size={13} />
@@ -144,6 +170,7 @@ function Shell() {
           </div>
         </header>
         <main>
+          <DemoBanner />
           <div className="context-row">
             <span>
               <span className="context-dot" />
@@ -165,6 +192,7 @@ function Shell() {
               <Route path="/equipment" element={<EquipmentPage />} />
               <Route path="/equipment/:id" element={<EquipmentDetail />} />
               <Route path="/incidents" element={<IncidentsPage />} />
+              <Route path="/maintenance" element={<MaintenancePage />} />
               <Route path="/analytics" element={<AnalyticsPage summary={summary.data} />} />
               <Route
                 path="*"
@@ -184,7 +212,8 @@ function Shell() {
               Учебные показатели и пороги. Не для управления реальным оборудованием.
             </span>
             <span>
-              <Server size={13} /> SQLite <i /> <Activity size={13} /> Интервал 2 с
+              <Server size={13} /> {runtime()?.mode === 'demo' ? 'Временное хранилище' : 'SQLite'}{' '}
+              <i /> <Activity size={13} /> Интервал {runtime()?.pollMs === 5000 ? '5' : '2'} с
             </span>
           </footer>
         </main>
@@ -196,7 +225,9 @@ export default function App() {
   const [version, setVersion] = useState(0);
   return (
     <RefreshContext.Provider value={{ version, refresh: () => setVersion((v) => v + 1) }}>
-      <Shell />
+      <SessionGate>
+        <Shell />
+      </SessionGate>
     </RefreshContext.Provider>
   );
 }

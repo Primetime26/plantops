@@ -6,18 +6,20 @@ import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createApp } from '../src/app.js';
+import { PrismaRepository } from '../src/storage/prisma.js';
 import { Simulator } from '../src/services/simulator.js';
 import { seed } from '../src/repositories/seed.js';
+import type { EquipmentRecord } from '../src/domain/models.js';
 import { evaluate } from '../src/domain/simulation.js';
 const folder = mkdtempSync(join(tmpdir(), 'plantops-test-'));
 const url = `file:${join(folder, 'test.db').replaceAll('\\', '/')}`;
 const db = new PrismaClient({ datasourceUrl: url });
 const simulator = new Simulator(
-  db,
+  new PrismaRepository(db),
   () => new Date(),
   () => 0.5,
 );
-const app = createApp(db, simulator);
+const app = createApp({ local: simulator, rateLimit: false });
 async function heat() {
   await request(app)
     .post('/api/simulation/equipment/H-101/fault')
@@ -36,6 +38,7 @@ beforeAll(async () => {
   await db.$connect();
 });
 beforeEach(async () => {
+  await db.workOrder.deleteMany();
   await db.incident.deleteMany();
   await db.telemetryReading.deleteMany();
   await db.equipment.deleteMany();
@@ -131,7 +134,7 @@ describe('PlantOps real SQLite API', () => {
     const incident = await heat();
     await simulator.acknowledge(incident.id);
     const second = new PrismaClient({ datasourceUrl: url });
-    const restarted = new Simulator(second);
+    const restarted = new Simulator(new PrismaRepository(second));
     await restarted.tick();
     expect((await second.equipment.findUniqueOrThrow({ where: { id: 'H-101' } })).overheat).toBe(
       true,
@@ -160,20 +163,89 @@ describe('PlantOps real SQLite API', () => {
     expect(incidents.body.items).toHaveLength(1);
     await request(app).get('/api/health').expect(200);
   });
+  it('persists maintenance comments, version and audit history across a fresh connection', async () => {
+    let order = (
+      await request(app)
+        .post('/api/maintenance')
+        .send({
+          equipmentId: 'H-101',
+          title: 'Осмотр насоса',
+          description: 'Проверка уплотнения',
+          assignee: 'Механик',
+        })
+        .expect(201)
+    ).body;
+    order = (
+      await request(app)
+        .patch(`/api/maintenance/${order.id}`)
+        .send({ version: 1, status: 'IN_PROGRESS' })
+        .expect(200)
+    ).body;
+    order = (
+      await request(app)
+        .post(`/api/maintenance/${order.id}/comments`)
+        .send({ version: 2, author: 'ОП', text: 'Проверка завершена' })
+        .expect(201)
+    ).body;
+    const second = new PrismaClient({ datasourceUrl: url });
+    const repo = new PrismaRepository(second);
+    const secondApp = createApp({ local: new Simulator(repo), rateLimit: false });
+    const restored = (await request(secondApp).get(`/api/maintenance/${order.id}`).expect(200))
+      .body;
+    expect(restored.version).toBe(3);
+    expect(restored.comments[0].text).toBe('Проверка завершена');
+    expect(restored.history).toHaveLength(3);
+    const completed = (
+      await request(secondApp)
+        .patch(`/api/maintenance/${order.id}`)
+        .send({ version: 3, status: 'COMPLETED', resolution: 'Работы завершены' })
+        .expect(200)
+    ).body;
+    expect(completed.completedAt).toBeTruthy();
+    await repo.close();
+    expect((await db.workOrder.findUniqueOrThrow({ where: { id: order.id } })).status).toBe(
+      'COMPLETED',
+    );
+  });
+  it('serializes conflicting SQLite updates and rolls back failed writes', async () => {
+    const order = (
+      await request(app).post('/api/maintenance').send({
+        equipmentId: 'H-101',
+        title: 'Проверка',
+        description: 'Проверить давление',
+        assignee: 'ОП',
+      })
+    ).body;
+    const edits = await Promise.all(
+      ['Версия A', 'Версия B'].map((title) =>
+        request(app).patch(`/api/maintenance/${order.id}`).send({ version: 1, title }),
+      ),
+    );
+    expect(edits.map((r) => r.status).sort()).toEqual([200, 409]);
+    await expect(
+      simulator.repository.transaction(async (tx) => {
+        const e = (await tx.equipment())[0];
+        await tx.saveEquipment({ ...e, overheat: true });
+        throw new Error('rollback');
+      }),
+    ).rejects.toThrow('rollback');
+    expect((await db.equipment.findMany()).every((e) => !e.overheat)).toBe(true);
+    await request(app).post('/api/demo/reset').expect(403);
+  });
   it('normal simulation remains below thresholds and exchanger has no vibration sensor', async () => {
     for (let i = 0; i < 30; i++) await simulator.tick();
     expect(await db.incident.count()).toBe(0);
     expect((await db.equipment.findUniqueOrThrow({ where: { id: 'T-301' } })).vibration).toBeNull();
     const e = await db.equipment.findUniqueOrThrow({ where: { id: 'H-101' } });
     expect(
-      evaluate(e, {
+      evaluate(e as EquipmentRecord, {
         temperature: e.temperatureWarning,
         pressure: e.pressureBase,
         vibration: e.vibrationBase,
       }).status,
     ).toBe('WARNING');
     expect(
-      evaluate(e, {
+      evaluate(e as EquipmentRecord, {
         temperature: e.temperatureCritical,
         pressure: e.pressureBase,
         vibration: e.vibrationBase,

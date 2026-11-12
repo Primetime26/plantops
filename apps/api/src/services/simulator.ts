@@ -1,95 +1,105 @@
-import type { PrismaClient } from '@prisma/client';
 import type { FaultType, SimulatorState } from '@plantops/contracts';
 import { AppError } from '../errors.js';
 import { nextValues } from '../domain/simulation.js';
 import { persistReading } from '../repositories/monitoring.js';
+import type { Repository, UnitOfWork } from '../storage/repository.js';
+export async function getEquipment(tx: UnitOfWork, id: string) {
+  const e = (await tx.equipment()).find((e) => e.id === id);
+  if (!e) throw new AppError(404, 'NOT_FOUND', 'Оборудование не найдено');
+  return e;
+}
 export class Simulator {
-  private queue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setTimeout>;
-  readonly state: SimulatorState = {
-    running: false,
-    intervalMs: 2000,
-    lastTickAt: null,
-    error: null,
-  };
+  private advancing: Promise<void> | null = null;
+  readonly state: SimulatorState;
   constructor(
-    private db: PrismaClient,
+    readonly repository: Repository,
     private now = () => new Date(),
-    private random = Math.random,
-  ) {}
-  // Single-process SQLite writer queue shared by ticks, faults, resets and acknowledgements.
-  private write<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(fn);
-    this.queue = result.catch(() => undefined);
-    return result;
+    private random = () => 0.5,
+    readonly onDemand = false,
+  ) {
+    this.state = {
+      running: onDemand,
+      intervalMs: onDemand ? 5000 : 2000,
+      lastTickAt: onDemand ? now().toISOString() : null,
+      error: null,
+      mode: onDemand ? 'on-demand' : 'background',
+    };
   }
-  tick() {
-    return this.write(async () => {
-      const time = this.now();
-      await this.db.$transaction(async (tx) => {
-        const equipment = await tx.equipment.findMany();
-        for (const e of equipment)
-          await persistReading(tx, e, nextValues(e, time, this.random), time);
-      });
-      this.state.lastTickAt = time.toISOString();
-      this.state.error = null;
+  async tick(time = this.now()) {
+    await this.repository.transaction(async (tx) => {
+      for (const e of await tx.equipment())
+        await persistReading(tx, e, nextValues(e, time, this.random), time);
     });
+    this.state.lastTickAt = time.toISOString();
+    this.state.error = null;
+  }
+  advance() {
+    if (!this.onDemand) return Promise.resolve();
+    if (this.advancing) return this.advancing;
+    this.advancing = (async () => {
+      const now = this.now().getTime(),
+        last = Date.parse(this.state.lastTickAt!);
+      const steps = Math.min(12, Math.max(0, Math.floor((now - last) / this.state.intervalMs)));
+      const base =
+        now - last > 12 * this.state.intervalMs ? now - steps * this.state.intervalMs : last;
+      for (let i = 1; i <= steps; i++) await this.tick(new Date(base + i * this.state.intervalMs));
+    })().finally(() => {
+      this.advancing = null;
+    });
+    return this.advancing;
   }
   fault(id: string, type: FaultType) {
-    return this.write(() =>
-      this.db.$transaction(async (tx) => {
-        const e = await tx.equipment.findUnique({ where: { id } });
-        if (!e) throw new AppError(404, 'NOT_FOUND', 'Оборудование не найдено');
-        return tx.equipment.update({
-          where: { id },
-          data: type === 'OVERHEAT' ? { overheat: true } : { overpressure: true },
-        });
-      }),
-    );
+    return this.repository.transaction(async (tx) => {
+      const e = await getEquipment(tx, id);
+      if (type === 'HIGH_VIBRATION' && e.vibration === null)
+        throw new AppError(422, 'NO_SENSOR', 'Для оборудования не предусмотрен датчик вибрации');
+      const next = {
+        ...e,
+        overheat: e.overheat || type === 'OVERHEAT' || type === 'COMBINED',
+        overpressure: e.overpressure || type === 'OVERPRESSURE' || type === 'COMBINED',
+        highVibration:
+          e.highVibration ||
+          type === 'HIGH_VIBRATION' ||
+          (type === 'COMBINED' && e.vibration !== null),
+      };
+      await tx.saveEquipment(next);
+      return next;
+    });
   }
   reset(id: string) {
-    return this.write(() =>
-      this.db.$transaction(async (tx) => {
-        const e = await tx.equipment.findUnique({ where: { id } });
-        if (!e) throw new AppError(404, 'NOT_FOUND', 'Оборудование не найдено');
-        const cleared = await tx.equipment.update({
-          where: { id },
-          data: { overheat: false, overpressure: false },
-        });
-        return persistReading(
-          tx,
-          cleared,
-          { temperature: e.temperatureBase, pressure: e.pressureBase, vibration: e.vibrationBase },
-          this.now(),
-        );
-      }),
-    );
+    return this.repository.transaction(async (tx) => {
+      const e = await getEquipment(tx, id);
+      return persistReading(
+        tx,
+        { ...e, overheat: false, overpressure: false, highVibration: false },
+        { temperature: e.temperatureBase, pressure: e.pressureBase, vibration: e.vibrationBase },
+        this.now(),
+      );
+    });
   }
   acknowledge(id: string) {
-    return this.write(() =>
-      this.db.$transaction(async (tx) => {
-        const incident = await tx.incident.findUnique({ where: { id } });
-        if (!incident) throw new AppError(404, 'NOT_FOUND', 'Инцидент не найден');
-        if (incident.status === 'RESOLVED')
-          throw new AppError(409, 'ALREADY_RESOLVED', 'Устранённый инцидент нельзя подтвердить');
-        if (incident.status === 'ACKNOWLEDGED') return incident;
-        return tx.incident.update({
-          where: { id },
-          data: { status: 'ACKNOWLEDGED', acknowledgedAt: this.now() },
-        });
-      }),
-    );
+    return this.repository.transaction(async (tx) => {
+      const i = (await tx.incidents()).find((i) => i.id === id);
+      if (!i) throw new AppError(404, 'NOT_FOUND', 'Инцидент не найден');
+      if (i.status === 'RESOLVED')
+        throw new AppError(409, 'ALREADY_RESOLVED', 'Устранённый инцидент нельзя подтвердить');
+      if (i.status === 'ACKNOWLEDGED') return i;
+      const next = { ...i, status: 'ACKNOWLEDGED' as const, acknowledgedAt: this.now() };
+      await tx.saveIncident(next);
+      return next;
+    });
   }
   start() {
-    if (this.state.running) return;
+    if (this.onDemand || this.state.running) return;
     this.state.running = true;
     const run = async () => {
       const started = Date.now();
       try {
         await this.tick();
-      } catch (error) {
+      } catch (e) {
         this.state.error = 'Ошибка записи телеметрии';
-        console.error(error);
+        console.error(e);
       }
       if (this.state.running)
         this.timer = setTimeout(run, Math.max(0, 2000 - (Date.now() - started)));
@@ -99,6 +109,7 @@ export class Simulator {
   async stop() {
     this.state.running = false;
     clearTimeout(this.timer);
-    await this.queue;
+    await this.advancing;
+    await this.repository.read(async () => undefined);
   }
 }

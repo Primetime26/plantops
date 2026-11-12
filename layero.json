@@ -1,0 +1,17 @@
+{
+  "$schema": "https://layero.ru/schema/layero-v2.json",
+  "framework": "generic",
+  "runtime": "node_web",
+  "buildCommand": "npm run build:demo",
+  "startCommand": "node --max-old-space-size=128 --max-semi-space-size=4 apps/api/dist/index.js",
+  "port": 3000,
+  "memory_mb": 256,
+  "preload": false,
+  "env": {
+    "APP_MODE": "demo",
+    "NODE_ENV": "production",
+    "HOST": "0.0.0.0",
+    "PORT": "3000",
+    "TRUST_LAYERO_PROXY": "true"
+  }
+}
